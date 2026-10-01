@@ -187,6 +187,29 @@ promote 는 본체를 바꾸는 되돌리기 비싼 행동이므로, 판정의 �
 마지막에 **무엇을 바꿨고, 지표가 어떻게 달라졌으며, 왜 그 판정(특히 무승부면 왜 확실하지
 않은지)을 내렸는지** 근거와 함께 요약 보고한다.
 
+## 평가 세트 모드 — 질의 1건 대신 "질문-평가기준 세트"로 비교 (권장)
+
+질의 하나로는 개선이 우연인지, 다른 동작이 망가졌는지 알 수 없다. 레포의 `evals/*.json`
+(핵심·회귀·경계 사례 + 룰 기반 기준 + LLM-as-a-Judge 기준)이 있으면 `eval_suite.py` 로
+같은 사이클을 세트 단위로 돈다. 엔진은 위 `metaharness.py` 의 격리 실행을 그대로 쓴다.
+
+```
+python skills/meta-harness/metaharness.py init
+python skills/meta-harness/eval_suite.py run --variant baseline --repeat 2 --jobs 3   # 실행+채점
+python skills/meta-harness/eval_suite.py report --variant baseline                    # 기준별 PASS/FAIL·Observation 지표
+# → 실패한 기준과 해당 run 의 transcript(suites/<세트>/<variant>/<case>/r<k>/transcript.md),
+#   trace(artifacts/traces/…jsonl)를 읽고 원인을 노브에 매핑 → fork + edit (위 3단계와 동일)
+python skills/meta-harness/eval_suite.py run --variant v1 --repeat 2 --jobs 3
+python skills/meta-harness/eval_suite.py compare --a baseline --b v1                  # 사례별 개선/회귀 + 판정 제안
+```
+
+- 채점: 룰 기반(파일 존재·정규식·링크 근거성·링크 수·Observation 지표)과 judge(기준별 True/False)를
+  함께 쓴다. `required` 기준이 하나라도 실패하면 그 사례는 FAIL.
+- judge 모델은 `EVAL_JUDGE_MODEL`(기본 `z-ai/glm-5.3`) — 에이전트와 다른 계열로 두어 자기 채점 편향을 줄인다.
+- `compare` 의 판정은 **제안**이다. 회귀 사례가 하나라도 있으면 candidate_win 이 나오지 않고,
+  반복 1회의 개선은 tie 로 둔다. promote 전 실제 산출물을 직접 확인한다.
+- 이미 저장된 실행을 기준만 바꿔 다시 채점하려면 `grade` 를 쓴다(에이전트 재실행 없음).
+
 ## 반복(선택)
 
 여러 가설을 누적 비교할 수 있다. baseline 을 고정 기준으로 두고 `v1, v2, …` 를 각각

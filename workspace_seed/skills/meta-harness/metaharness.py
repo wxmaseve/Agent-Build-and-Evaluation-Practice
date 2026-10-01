@@ -66,7 +66,7 @@ ENV_ALLOWLIST = {
 # promote 로 본체에 되돌릴 수 있는 소스 경로(안전 화이트리스트).
 # .env / uv.lock / pyproject 등 설정·시크릿은 기본 제외(--include-config 로 포함).
 PROMOTABLE_PREFIXES = (
-    "langchain-deepagents.py", "connectors.py", "gateway.py",
+    "langchain-deepagents.py", "connectors.py", "gateway.py", "observability.py",
     "langgraph.json", "workspace_seed/",
 )
 

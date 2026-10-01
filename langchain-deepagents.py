@@ -33,6 +33,9 @@ from langchain.chat_models import init_chat_model
 # 로컬 모듈: 외부 서비스 커넥터(Slack / Telegram / Email)
 from connectors import build_messaging_tools
 
+# 로컬 모듈: Observation(실행 기록 trace) 콜백
+from observability import build_callbacks
+
 # ---------------------------------------------------------------------------
 # 환경변수 & 모델
 # ---------------------------------------------------------------------------
@@ -403,6 +406,10 @@ For longer tasks, provide brief progress updates at reasonable intervals — a c
 _profile_key = f"{get_model_provider(model)}:{get_model_identifier(model)}"
 register_harness_profile(_profile_key, HarnessProfile(base_system_prompt=SYSTEM_PROMPT))
 
+# Observation 콜백(로컬 JSONL trace → /traces/, LangSmith 는 env 로 자동). observability.py 참고.
+OBS_CALLBACKS = build_callbacks(WORKSPACE)
+
+
 # deep agent 생성 (langgraph.json 이 이 `agent` 그래프를 참조).
 # system_prompt 를 넘기지 않으므로 위에서 등록한 SYSTEM_PROMPT 가 그대로 사용된다.
 def build_agent(checkpointer=None):
@@ -412,7 +419,7 @@ def build_agent(checkpointer=None):
     유지하며 재사용할 수 있다. checkpointer=None 이면 langgraph dev 가 자체 지속성을
     제공한다.
     """
-    return create_deep_agent(
+    graph = create_deep_agent(
         model=model,
         tools=connector_tools,
         backend=backend,
@@ -420,6 +427,9 @@ def build_agent(checkpointer=None):
         memory=MEMORY_SOURCES,
         checkpointer=checkpointer,
     )
+    # Observation: 모든 실행(Studio·게이트웨이·meta-harness 헤드리스)에 trace 콜백을 묶는다.
+    # with_config 는 기존 설정(recursion_limit 등)과 병합된 복사본을 돌려준다.
+    return graph.with_config({"callbacks": OBS_CALLBACKS}) if OBS_CALLBACKS else graph
 
 
 agent = build_agent()
