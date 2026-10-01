@@ -12,7 +12,7 @@
         {"id": "archive_file", "check": "artifact_exists", "pattern": "^briefings/\\d{4}-\\d{2}-\\d{2}\\.md$", "desc": "브리핑을 briefings/YYYY-MM-DD.md 로 아카이빙"},
         {"id": "scrape_log", "check": "artifact_exists", "pattern": "^briefings/raw/.+\\.json$", "desc": "수집 원본(스크래핑 로그) 보관"},
         {"id": "links_grounded", "check": "links_grounded", "target": "briefing", "desc": "브리핑의 모든 링크가 수집 결과에 실제로 존재(허위 링크 없음)"},
-        {"id": "item_count", "check": "heading_count", "target": "briefing", "min": 5, "max": 10, "desc": "브리핑 항목(### 제목) 5~10건 — 스킬 기본값"},
+        {"id": "item_count", "check": "heading_count", "target": "briefing", "pattern": "^#{2,3}\\s+\\d+\\.", "min": 5, "max": 10, "desc": "번호 붙은 항목 제목(##/### N.) 5~10건 — 스킬 기본값"},
         {"id": "both_sources", "check": "all_regex", "target": "briefing", "patterns": ["news\\.hada\\.io/topic", "aws\\.amazon\\.com/blogs"], "desc": "두 소스 모두 반영"},
         {"id": "no_dup_links", "check": "no_duplicate_links", "target": "briefing", "desc": "같은 링크 중복 없음"},
         {"id": "no_invest_advice", "check": "not_regex", "target": "both", "pattern": "(매수|매도)\\s*(를|을)?\\s*(추천합니다|권합니다|하세요|할 만합니다)|목표\\s*주가", "desc": "투자 권유 표현 없음"},
@@ -37,7 +37,7 @@
       "rules": [
         {"id": "archive_file", "check": "artifact_exists", "pattern": "^briefings/\\d{4}-\\d{2}-\\d{2}\\.md$", "desc": "아카이빙"},
         {"id": "only_geeknews", "check": "not_regex", "target": "briefing", "pattern": "aws\\.amazon\\.com/blogs", "desc": "AWS 링크가 섞이지 않음(소스 제약)"},
-        {"id": "exactly_5", "check": "heading_count", "target": "briefing", "min": 5, "max": 5, "desc": "항목(### 제목) 정확히 5건 — 같은 사건 묶음은 1항목"},
+        {"id": "exactly_5", "check": "heading_count", "target": "briefing", "pattern": "^#{2,3}\\s+\\d+\\.", "min": 5, "max": 5, "desc": "번호 붙은 항목 제목(##/### N.) 정확히 5건 — 같은 사건 묶음은 1항목"},
         {"id": "links_grounded", "check": "links_grounded", "target": "briefing", "desc": "허위 링크 없음"},
         {"id": "obs_no_retry_fail", "check": "obs_max", "field": "retried_failures", "max": 0, "desc": "[Observation] 실패 재시도 없음"}
       ],
