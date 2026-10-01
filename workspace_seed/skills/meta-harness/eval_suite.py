@@ -125,8 +125,8 @@ def cmd_run(args) -> int:
         print(f"[suite] 실행 중 바뀐 variant 소스를 되돌렸습니다: {reverted}")
 
     if not args.no_grade:
-        for case, out in jobs:
-            _grade_run(case, out, args.judge_model)
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            list(ex.map(lambda j: _grade_run(j[0], j[1], args.judge_model), jobs))
         _write_report(suite, args.variant, root)
         print((root / "report.md").read_text(encoding="utf-8"))
     return 0
@@ -223,6 +223,12 @@ def _check_rule(rule: dict, run: dict) -> tuple[bool, str]:
         n = len(links)
         ok = rule.get("min", 0) <= n <= rule.get("max", 10**9)
         return ok, f"{n}건 (기준 {rule.get('min', 0)}~{rule.get('max', '∞')})"
+    if c == "heading_count":
+        # 항목 수는 링크 수가 아니라 항목 제목 수로 센다(중복 발표를 한 항목에 묶으면 링크가 2개일 수 있다).
+        text = _target(run, rule["target"])
+        n = len(re.findall(rule.get("pattern", r"^###\s+\S"), text, re.M))
+        ok = rule.get("min", 0) <= n <= rule.get("max", 10**9)
+        return ok, f"항목 {n}개 (기준 {rule.get('min', 0)}~{rule.get('max', '∞')})"
     if c == "no_duplicate_links":
         text = _target(run, rule["target"])
         # 같은 항목에서 '[제목](url)' 과 'url' 을 같이 쓰는 경우는 중복이 아니므로 줄 단위로 센다.
@@ -267,13 +273,13 @@ _JUDGE_SYSTEM = """너는 AI 에이전트 실행 결과를 채점하는 엄격�
 {"results": [{"id": "<기준 id>", "pass": true|false, "reason": "<한 문장>"}]}"""
 
 
-def _candidates_digest(run: dict, limit: int = 12000) -> str:
+def _candidates_digest(run: dict, limit: int = 24000) -> str:
     try:
         items = []
         for chunk in re.split(r"\n(?=\{)", run["raw"].strip()):
             if chunk.strip():
                 items += json.loads(chunk).get("items", [])
-        text = "\n".join(f"- [{i.get('source')}] {i.get('title')} | {i.get('url')} | {i.get('summary', '')[:160]}" for i in items)
+        text = "\n".join(f"- [{i.get('source')}] {i.get('title')} | {i.get('url')} | {i.get('summary', '')[:400]}" for i in items)
     except (ValueError, AttributeError):
         text = run["tool_text"]
     if not text.strip():
@@ -291,8 +297,10 @@ def _judge(case: dict, run: dict, model_id: str) -> dict:
     llm = init_chat_model(
         model=model_id, model_provider="openai",
         api_key=os.getenv("OPENAI_API_KEY"), base_url="https://openrouter.ai/api/v1",
-        temperature=0, max_tokens=8000,
-        http_client=httpx.Client(verify=False, timeout=120),
+        temperature=0, max_tokens=16000,
+        # 추론형 judge 는 추론에 토큰을 다 써서 빈 응답을 낼 수 있다(실측: 8000 토큰 전부 reasoning).
+        reasoning_effort=os.getenv("EVAL_JUDGE_REASONING", "low"),
+        http_client=httpx.Client(verify=False, timeout=180),
     )
     user = f"""# 사용자 질의
 {case['query']}
@@ -308,18 +316,24 @@ def _judge(case: dict, run: dict, model_id: str) -> dict:
 
 # 평가 기준
 """ + "\n".join(f"- {c['id']}: {c['criterion']}" for c in criteria)
+    # 판정 불가는 실패가 아니라 '미검증(None)'으로 남긴다 → 비교 시 inconclusive 로 처리.
+    got: dict = {}
     last_err = ""
-    for _ in range(2):
+    for _ in range(3):
         try:
             resp = llm.invoke([("system", _JUDGE_SYSTEM), ("user", user)])
             text = mh._text_of_content(resp.content)
             m = re.search(r"\{.*\}", text, re.S)
             data = json.loads(m.group(0)) if m else {}
-            out = {r["id"]: (bool(r["pass"]), str(r.get("reason", ""))) for r in data.get("results", [])}
-            return {c["id"]: out.get(c["id"], (False, "judge 응답에 해당 기준 없음")) for c in criteria}
+            for r in data.get("results", []):
+                if r.get("id") in {c["id"] for c in criteria} and isinstance(r.get("pass"), bool):
+                    got[r["id"]] = (r["pass"], str(r.get("reason", "")))
+            if len(got) == len(criteria):
+                break
+            last_err = f"응답에서 {len(got)}/{len(criteria)}개 기준만 파싱(finish={resp.response_metadata.get('finish_reason')})"
         except Exception as e:  # noqa: BLE001
             last_err = f"{type(e).__name__}: {e}"
-    return {c["id"]: (False, f"judge 실패: {last_err[:200]}") for c in criteria}
+    return {c["id"]: got.get(c["id"], (None, f"unverified — judge 실패: {last_err[:200]}")) for c in criteria}
 
 
 def _grade_run(case: dict, out: Path, judge_model: str) -> dict:
@@ -332,15 +346,17 @@ def _grade_run(case: dict, out: Path, judge_model: str) -> dict:
         crit = next(c["criterion"] for c in case["judge"] if c["id"] == cid)
         results.append({"id": cid, "kind": "judge", "desc": crit, "pass": ok, "detail": why})
     required = set(case.get("required", []))
-    req_fail = [r["id"] for r in results if r["id"] in required and not r["pass"]]
+    req_fail = [r["id"] for r in results if r["id"] in required and r["pass"] is False]
+    unverified = [r["id"] for r in results if r["pass"] is None]
     grade = {
         "case": case["id"],
         "type": case.get("type"),
         "run": out.name,
         "error": run["summary"].get("error"),
-        "passed": not req_fail and not run["summary"].get("error"),
+        "passed": not req_fail and not unverified and not run["summary"].get("error"),
         "required_failed": req_fail,
-        "score": round(sum(r["pass"] for r in results) / len(results), 3) if results else 0.0,
+        "unverified": unverified,
+        "score": round(sum(r["pass"] is True for r in results) / len(results), 3) if results else 0.0,
         "results": results,
         "obs": {k: run["obs"][k] for k in ("llm_calls", "tool_calls", "tool_errors", "retried_failures",
                                            "tokens_in", "tokens_out", "est_cost_usd", "latency_s", "flags")},
@@ -355,10 +371,10 @@ def cmd_grade(args) -> int:
     home = mh.home_dir(repo, args.home)
     suite = _load_suite(_suite_path(repo, args.suite))
     root = _suite_root(home, suite, args.variant)
-    for case in _pick_cases(suite, args.cases):
-        for out in sorted((root / case["id"]).glob("r*")):
-            g = _grade_run(case, out, args.judge_model)
-            print(f"[grade] {case['id']}/{out.name}: passed={g['passed']} score={g['score']}")
+    todo = [(case, out) for case in _pick_cases(suite, args.cases) for out in sorted((root / case["id"]).glob("r*"))]
+    with ThreadPoolExecutor(max_workers=6) as ex:  # judge 호출이 병목이라 병렬로 채점
+        for g in ex.map(lambda j: _grade_run(j[0], j[1], args.judge_model), todo):
+            print(f"[grade] {g['case']}/{g['run']}: passed={g['passed']} score={g['score']}")
     _write_report(suite, args.variant, root)
     print((root / "report.md").read_text(encoding="utf-8"))
     return 0
@@ -390,7 +406,9 @@ def _write_report(suite: dict, variant: str, root: Path) -> None:
         total_pass += npass
         total_runs += len(gs)
         mean = sum(g["score"] for g in gs) / len(gs)
-        fails = sorted({f for g in gs for f in g["required_failed"]} | ({"run_error"} if any(g["error"] for g in gs) else set()))
+        fails = sorted({f for g in gs for f in g["required_failed"]}
+                       | {f"{u}(미검증)" for g in gs for u in g.get("unverified", [])}
+                       | ({"run_error"} if any(g["error"] for g in gs) else set()))
         o = [g["obs"] for g in gs]
         lines.append(
             f"| {case['id']} | {case.get('type')} | {npass}/{len(gs)} | {mean:.2f} | {', '.join(fails) or '-'} | "
@@ -405,7 +423,7 @@ def _write_report(suite: dict, variant: str, root: Path) -> None:
             if g["error"]:
                 lines.append(f"- ⚠️ run error: {g['error']}")
             for r in g["results"]:
-                mark = "✅" if r["pass"] else "❌"
+                mark = {True: "✅", False: "❌", None: "⚠️"}[r["pass"]]
                 lines.append(f"- {mark} `{r['id']}` ({r['kind']}) {r['detail']}")
             if g["obs"]["flags"]:
                 lines.append(f"- 🔎 Observation flags: {g['obs']['flags']}")
@@ -461,6 +479,9 @@ def cmd_compare(args) -> int:
             lines.append(f"|  | ↳ 기준 변화 | {' · '.join(diffs)} |  |  |  |  |")
 
     reps = min([len(v) for v in list(ga.values()) + list(gb.values())] or [0])
+    unverified = sorted({g["case"] for gs in list(ga.values()) + list(gb.values()) for g in gs if g.get("unverified")})
+    if unverified:
+        incomplete += [f"{c}(미검증 기준)" for c in unverified]
     if incomplete:
         verdict = "inconclusive"
         why = f"한쪽 결과가 없는 사례: {incomplete}"
